@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +14,17 @@ class Settings(BaseSettings):
 
     helpdesk_timeout_seconds: float = 10.0
     helpdesk_max_retries: int = 5
+
+    @field_validator("database_url")
+    @classmethod
+    def _asyncpg_scheme(cls, v: str) -> str:
+        # Heroku's Postgres addon sets DATABASE_URL with the plain "postgres://"
+        # scheme, which the asyncpg driver doesn't recognize.
+        if v.startswith("postgres://"):
+            return "postgresql+asyncpg://" + v[len("postgres://") :]
+        if v.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + v[len("postgresql://") :]
+        return v
 
 
 settings = Settings()

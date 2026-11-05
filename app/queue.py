@@ -7,7 +7,12 @@ _pool: ArqRedis | None = None
 
 
 def get_redis_settings() -> RedisSettings:
-    return RedisSettings.from_dsn(settings.redis_url)
+    redis_settings = RedisSettings.from_dsn(settings.redis_url)
+    if redis_settings.ssl:
+        # Heroku's Redis addon terminates TLS with a self-signed cert, which
+        # arq's default ssl_cert_reqs="required" would reject.
+        redis_settings.ssl_cert_reqs = "none"
+    return redis_settings
 
 
 async def get_arq_pool() -> ArqRedis:
