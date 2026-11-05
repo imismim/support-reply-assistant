@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <title>Звернення в підтримку</title>
+  <style>
+    body { font-family: sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    .ticket { border: 1px solid #ccc; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    .meta { color: #666; font-size: 0.85rem; }
+    .status { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.8rem; background: #eee; }
+    .draft { background: #f7f7f7; border-left: 3px solid #999; padding: 0.5rem 1rem; margin: 0.75rem 0; white-space: pre-wrap; }
+    .citations { font-size: 0.85rem; color: #555; }
+    form { display: inline; }
+    button { margin-right: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Звернення в підтримку</h1>
+
+  {% for ticket in tickets %}
+  <div class="ticket">
+    <div class="meta">
+      Тікет {{ ticket.ticket_id }} · {{ ticket.customer_email }} ·
+      <span class="status">{{ ticket.status.value }}</span>
+    </div>
+    <p><strong>Повідомлення клієнта:</strong> {{ ticket.message }}</p>
+
+    {% if ticket.draft %}
+    <div class="draft">{{ ticket.draft.content }}</div>
+    {% if ticket.draft.cited_article_ids %}
+    <div class="citations">Статті бази знань: {{ ticket.draft.cited_article_ids | join(', ') }}</div>
+    {% endif %}
+    {% elif ticket.status.value in ("received", "drafting") %}
+    <p><em>Чернетка генерується…</em></p>
+    {% endif %}
+
+    {% if ticket.status.value == "pending_review" %}
+    <form method="post" action="/tickets/{{ ticket.id }}/approve">
+      <button type="submit">Підтвердити</button>
+    </form>
+    <form method="post" action="/tickets/{{ ticket.id }}/reject">
+      <button type="submit">Відхилити</button>
+    </form>
+    {% endif %}
+
+    {% if ticket.outbound_reply %}
+    <div class="meta">Доставка: {{ ticket.outbound_reply.status }} (спроб: {{ ticket.outbound_reply.attempt_count }})</div>
+    {% endif %}
+  </div>
+  {% else %}
+  <p>Звернень немає.</p>
+  {% endfor %}
+</body>
+</html>
