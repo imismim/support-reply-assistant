@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_session
-from app.models import OutboundReply, Ticket, TicketStatus
+from app.models import KBArticle, OutboundReply, Ticket, TicketStatus
 from app.queue import get_arq_pool
 
 router = APIRouter()
@@ -23,7 +23,10 @@ async def list_tickets(request: Request, session: AsyncSession = Depends(get_ses
         .order_by(Ticket.created_at.desc())
     )
     tickets = (await session.execute(stmt)).scalars().all()
-    return templates.TemplateResponse(request, "tickets.html", {"tickets": tickets})
+    article_titles = dict((await session.execute(select(KBArticle.id, KBArticle.title))).all())
+    return templates.TemplateResponse(
+        request, "tickets.html", {"tickets": tickets, "article_titles": article_titles}
+    )
 
 
 @router.post("/tickets/{ticket_id}/approve")

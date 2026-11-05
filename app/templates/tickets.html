@@ -28,7 +28,9 @@
     {% if ticket.draft %}
     <div class="draft">{{ ticket.draft.content }}</div>
     {% if ticket.draft.cited_article_ids %}
-    <div class="citations">Статті бази знань: {{ ticket.draft.cited_article_ids | join(', ') }}</div>
+    <div class="citations">Використані статті бази знань:
+      {% for article_id in ticket.draft.cited_article_ids %}«{{ article_titles.get(article_id, "#" ~ article_id) }}»{% if not loop.last %}, {% endif %}{% endfor %}
+    </div>
     {% endif %}
     {% elif ticket.status.value in ("received", "drafting") %}
     <p><em>Чернетка генерується…</em></p>
