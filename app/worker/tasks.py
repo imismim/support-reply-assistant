@@ -30,7 +30,24 @@ async def generate_draft(ctx: dict, ticket_id: int) -> None:
     articles = await search_relevant_articles(ticket.message, limit=3)
 
     await acquire_llm_slot(ctx["redis"], settings.llm_rate_limit_per_minute)
-    draft_content = await ctx["llm_client"].generate_draft(ticket.message, articles)
+    try:
+        draft_content = await ctx["llm_client"].generate_draft(ticket.message, articles)
+    except Exception:
+        # Without resetting the status, the retried job would see "drafting"
+        # and skip the ticket forever. Free-tier LLMs return 429/503 often
+        # enough that this is a normal path, not an edge case.
+        job_try = ctx["job_try"]
+        async with AsyncSessionLocal() as session:
+            ticket = await session.get(Ticket, ticket_id)
+            if job_try >= settings.llm_max_retries:
+                ticket.status = TicketStatus.failed
+                await session.commit()
+                logger.exception("Giving up generating draft for ticket %s after %s tries", ticket_id, job_try)
+                return
+            ticket.status = TicketStatus.received
+            await session.commit()
+        logger.warning("Draft generation failed for ticket %s (try %s), retrying", ticket_id, job_try, exc_info=True)
+        raise Retry(defer=min(60, 5 * 2**job_try))
 
     async with AsyncSessionLocal() as session:
         insert_stmt = (
@@ -110,3 +127,5 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10
+    # arq's default (5) would silently cap both retry settings.
+    max_tries = max(settings.helpdesk_max_retries, settings.llm_max_retries)

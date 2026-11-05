@@ -6,6 +6,7 @@
 
 - FastAPI (async) + SQLAlchemy 2.0 (async, `Mapped`/`mapped_column`) + asyncpg + Alembic.
 - `arq` (не Celery/RQ) для фонових задач — тримає весь стек асинхронним (web і worker діляться тим самим async ORM-кодом).
+- LLM — за протоколом `LLMProvider` (`app/services/llm.py`): Gemini за замовчуванням, Anthropic як альтернатива (`LLM_PROVIDER`). Fallback-режим без ключа спільний для обох.
 - `app/routers/*` — тільки HTTP-шар (валідація, виклик сервісів/задач, відповідь). Бізнес-логіка — в `app/services/*` і `app/worker/tasks.py`.
 - Міграції генеруються через `alembic revision --autogenerate`, не пишуться руками — модель (`app/models.py`) є єдиним джерелом правди для схеми.
 
@@ -25,7 +26,7 @@ NOTHING` на унікальному ключі, і подальша дія (enq
 - `pytest-asyncio` у режимі `auto` (без `@pytest.mark.asyncio` на кожному тесті).
 - Тести з реальною Postgres/Redis (окрема БД `support_reply_test`, окремий Redis DB-індекс), не mock ORM — важливо саме перевірити поведінку БД під час конкурентних запитів (unique constraint race).
 - Час (LLM fallback delay, rate-limiter window) — через `monkeypatch` на `asyncio.sleep`/`time.time`, а не реальне очікування в тестах.
-- HTTP-залежності (хелпдеск, Anthropic) — через `httpx.MockTransport` / `AsyncMock`, не реальні запити.
+- HTTP-залежності (хелпдеск, Gemini/Anthropic) — через `httpx.MockTransport` / `AsyncMock`, не реальні запити. LLM-провайдер мокається на рівні SDK-клієнта всередині `GeminiProvider`/`AnthropicProvider`.
 
 ## Інше
 
