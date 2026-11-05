@@ -33,7 +33,7 @@ async def _status(session_factory, ticket_id: int) -> TicketStatus:
         return (await session.get(Ticket, ticket_id)).status
 
 
-async def test_llm_error_resets_status_and_retries(session_factory, redis_client, no_kb_search):
+async def test_llm_error_retries_and_resumes_from_drafting(session_factory, redis_client, no_kb_search):
     ticket_id = await _create_ticket(session_factory)
     llm = AsyncMock()
     llm.generate_draft.side_effect = RuntimeError("503 UNAVAILABLE")
@@ -42,7 +42,7 @@ async def test_llm_error_resets_status_and_retries(session_factory, redis_client
     with pytest.raises(Retry):
         await tasks.generate_draft(ctx, ticket_id)
 
-    assert await _status(session_factory, ticket_id) == TicketStatus.received
+    assert await _status(session_factory, ticket_id) == TicketStatus.drafting
 
     llm.generate_draft.side_effect = None
     llm.generate_draft.return_value = "готова відповідь"
@@ -63,3 +63,28 @@ async def test_llm_error_marks_failed_after_max_retries(session_factory, redis_c
     await tasks.generate_draft({"redis": redis_client, "llm_client": llm, "job_try": 3}, ticket_id)
 
     assert await _status(session_factory, ticket_id) == TicketStatus.failed
+
+
+async def test_ticket_left_in_drafting_by_crashed_worker_is_resumed(session_factory, redis_client, no_kb_search):
+    ticket_id = await _create_ticket(session_factory)
+    async with session_factory() as session:
+        (await session.get(Ticket, ticket_id)).status = TicketStatus.drafting
+        await session.commit()
+    llm = AsyncMock()
+    llm.generate_draft.return_value = "відповідь після рестарту"
+
+    await tasks.generate_draft({"redis": redis_client, "llm_client": llm, "job_try": 1}, ticket_id)
+
+    assert await _status(session_factory, ticket_id) == TicketStatus.pending_review
+
+
+async def test_already_reviewed_ticket_is_not_redrafted(session_factory, redis_client, no_kb_search):
+    ticket_id = await _create_ticket(session_factory)
+    async with session_factory() as session:
+        (await session.get(Ticket, ticket_id)).status = TicketStatus.pending_review
+        await session.commit()
+    llm = AsyncMock()
+
+    await tasks.generate_draft({"redis": redis_client, "llm_client": llm, "job_try": 1}, ticket_id)
+
+    llm.generate_draft.assert_not_called()

@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     helpdesk_timeout_seconds: float = 10.0
     helpdesk_max_retries: int = 5
 
+    # Longer than a peak backlog takes to drain, so healthy queued work isn't
+    # mistaken for stuck (and re-enqueueing a live job is a no-op anyway).
+    stuck_ticket_after_seconds: int = 600
+
     @field_validator("database_url")
     @classmethod
     def _asyncpg_scheme(cls, v: str) -> str:

@@ -33,23 +33,24 @@ async def approve_ticket(
     arq_pool: ArqRedis = Depends(get_arq_pool),
 ):
     ticket = await session.get(Ticket, ticket_id)
-    if ticket is None or ticket.status != TicketStatus.pending_review:
+    # "approved" is accepted too, so a repeated click can re-enqueue delivery
+    # if the first request committed but failed before reaching Redis.
+    if ticket is None or ticket.status not in (TicketStatus.pending_review, TicketStatus.approved):
         raise HTTPException(409, "Ticket is not awaiting review")
 
     ticket.status = TicketStatus.approved
 
-    # Same insert-if-new idempotency pattern as the webhook: only the first
-    # Approve click creates the outbound row and enqueues delivery.
     outbound_insert = (
         pg_insert(OutboundReply)
         .values(ticket_id=ticket_id, status="pending")
         .on_conflict_do_nothing(index_elements=["ticket_id"])
     )
-    result = await session.execute(outbound_insert)
+    await session.execute(outbound_insert)
     await session.commit()
 
-    if result.rowcount > 0:
-        await arq_pool.enqueue_job("send_reply", ticket_id, _job_id=f"send:{ticket_id}")
+    # Double clicks collapse on arq's job id, and send_reply itself refuses to
+    # send once the outbound row is "sent".
+    await arq_pool.enqueue_job("send_reply", ticket_id, _job_id=f"send:{ticket_id}")
 
     return RedirectResponse(url="/", status_code=303)
 

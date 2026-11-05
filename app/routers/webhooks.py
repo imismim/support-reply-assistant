@@ -30,8 +30,7 @@ async def receive_helpdesk_webhook(
         )
         .on_conflict_do_nothing(index_elements=["event_id"])
     )
-    result = await session.execute(event_insert)
-    is_new_event = result.rowcount > 0
+    await session.execute(event_insert)
 
     ticket_insert = (
         pg_insert(Ticket)
@@ -47,8 +46,13 @@ async def receive_helpdesk_webhook(
     await session.execute(ticket_insert)
     await session.commit()
 
-    if is_new_event:
-        ticket = await session.scalar(select(Ticket).where(Ticket.ticket_id == payload.ticket_id))
-        await arq_pool.enqueue_job("generate_draft", ticket.id, _job_id=f"draft:{payload.event_id}")
+    # Enqueue based on ticket state, not on whether this delivery was the first:
+    # if a previous delivery committed but crashed (or Redis was down) before
+    # enqueueing, the helpdesk's retry is our only chance to schedule the
+    # draft, and gating on "new event" would drop the ticket forever.
+    # Redundant enqueues are collapsed atomically by arq's per-ticket job id.
+    ticket = await session.scalar(select(Ticket).where(Ticket.ticket_id == payload.ticket_id))
+    if ticket.status in (TicketStatus.received, TicketStatus.drafting):
+        await arq_pool.enqueue_job("generate_draft", ticket.id, _job_id=f"draft:{ticket.id}")
 
     return {"status": "accepted"}

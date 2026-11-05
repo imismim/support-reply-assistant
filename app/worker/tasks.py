@@ -1,7 +1,7 @@
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from arq import Retry
+from arq import Retry, cron
 from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 async def generate_draft(ctx: dict, ticket_id: int) -> None:
     async with AsyncSessionLocal() as session:
         ticket = await session.get(Ticket, ticket_id)
-        if ticket is None or ticket.status != TicketStatus.received:
-            # Already processed by an earlier/duplicate run of this job.
+        # "drafting" is resumable: a worker that crashed mid-call leaves the
+        # ticket there, and arq (or the recovery cron) re-runs this job. Only
+        # one job per ticket can exist thanks to the "draft:{id}" job id.
+        if ticket is None or ticket.status not in (TicketStatus.received, TicketStatus.drafting):
             return
         ticket.status = TicketStatus.drafting
         await session.commit()
@@ -33,19 +35,16 @@ async def generate_draft(ctx: dict, ticket_id: int) -> None:
     try:
         draft_content = await ctx["llm_client"].generate_draft(ticket.message, articles)
     except Exception:
-        # Without resetting the status, the retried job would see "drafting"
-        # and skip the ticket forever. Free-tier LLMs return 429/503 often
-        # enough that this is a normal path, not an edge case.
+        # Free-tier LLMs return 429/503 often enough that this is a normal
+        # path, not an edge case.
         job_try = ctx["job_try"]
-        async with AsyncSessionLocal() as session:
-            ticket = await session.get(Ticket, ticket_id)
-            if job_try >= settings.llm_max_retries:
+        if job_try >= settings.llm_max_retries:
+            async with AsyncSessionLocal() as session:
+                ticket = await session.get(Ticket, ticket_id)
                 ticket.status = TicketStatus.failed
                 await session.commit()
-                logger.exception("Giving up generating draft for ticket %s after %s tries", ticket_id, job_try)
-                return
-            ticket.status = TicketStatus.received
-            await session.commit()
+            logger.exception("Giving up generating draft for ticket %s after %s tries", ticket_id, job_try)
+            return
         logger.warning("Draft generation failed for ticket %s (try %s), retrying", ticket_id, job_try, exc_info=True)
         raise Retry(defer=min(60, 5 * 2**job_try))
 
@@ -68,49 +67,68 @@ async def generate_draft(ctx: dict, ticket_id: int) -> None:
 
 async def send_reply(ctx: dict, ticket_id: int) -> None:
     async with AsyncSessionLocal() as session:
-        outbound = await session.execute(
+        # The row lock is held across the HTTP call on purpose: a concurrent
+        # attempt blocks here until this one commits, then sees "sent".
+        # Releasing it before the call would let two attempts send in parallel.
+        outbound = await session.scalar(
             select(OutboundReply).where(OutboundReply.ticket_id == ticket_id).with_for_update()
         )
-        outbound = outbound.scalar_one()
-
-        if outbound.status == "sent":
-            # A previous attempt already succeeded; never send twice.
+        if outbound is None or outbound.status in ("sent", "failed"):
             return
 
-        outbound.status = "sending"
-        outbound.attempt_count += 1
-        await session.commit()
-
         ticket = await session.get(Ticket, ticket_id)
-        draft = await session.execute(select(Draft).where(Draft.ticket_id == ticket_id))
-        draft = draft.scalar_one()
-        reply_url, ticket_ext_id, message = ticket.reply_url, ticket.ticket_id, draft.content
+        draft = await session.scalar(select(Draft).where(Draft.ticket_id == ticket_id))
+        outbound.attempt_count += 1
 
-    try:
-        await send_reply_to_helpdesk(reply_url, ticket_ext_id, message)
-    except HelpdeskDeliveryError as exc:
-        async with AsyncSessionLocal() as session:
-            outbound = await session.get(OutboundReply, outbound.id)
+        try:
+            # Stable per reply, so a retry after "helpdesk stored it but we
+            # timed out" is recognised as a duplicate on the helpdesk side.
+            await send_reply_to_helpdesk(
+                ticket.reply_url, ticket.ticket_id, draft.content, idempotency_key=f"reply-{outbound.id}"
+            )
+        except HelpdeskDeliveryError as exc:
             outbound.last_error = str(exc)[:2000]
             job_try = ctx["job_try"]
             if job_try >= settings.helpdesk_max_retries:
                 outbound.status = "failed"
-                ticket = await session.get(Ticket, ticket_id)
                 ticket.status = TicketStatus.failed
                 await session.commit()
                 logger.error("Giving up sending reply for ticket %s after %s tries", ticket_id, job_try)
                 return
-            outbound.status = "pending"
             await session.commit()
-        raise Retry(defer=min(60, 2**job_try))
+            raise Retry(defer=min(60, 2**job_try))
 
-    async with AsyncSessionLocal() as session:
-        outbound = await session.get(OutboundReply, outbound.id)
         outbound.status = "sent"
         outbound.sent_at = datetime.now(UTC)
-        ticket = await session.get(Ticket, ticket_id)
+        outbound.last_error = None
         ticket.status = TicketStatus.sent
         await session.commit()
+
+
+async def requeue_stuck_tickets(ctx: dict) -> None:
+    """Safety net for work whose job vanished: Redis lost it (restart without
+    persistence, eviction) or an enqueue failed after the DB commit and no
+    retry from the helpdesk/operator followed. Re-enqueueing a ticket that
+    still has a live job is a no-op thanks to the per-ticket job id.
+    """
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.stuck_ticket_after_seconds)
+    async with AsyncSessionLocal() as session:
+        to_draft = await session.scalars(
+            select(Ticket.id).where(
+                Ticket.status.in_([TicketStatus.received, TicketStatus.drafting]), Ticket.updated_at < cutoff
+            )
+        )
+        to_send = await session.scalars(
+            select(Ticket.id).where(Ticket.status == TicketStatus.approved, Ticket.updated_at < cutoff)
+        )
+        to_draft, to_send = list(to_draft), list(to_send)
+
+    for ticket_id in to_draft:
+        if await ctx["redis"].enqueue_job("generate_draft", ticket_id, _job_id=f"draft:{ticket_id}"):
+            logger.warning("Re-enqueued draft generation for stuck ticket %s", ticket_id)
+    for ticket_id in to_send:
+        if await ctx["redis"].enqueue_job("send_reply", ticket_id, _job_id=f"send:{ticket_id}"):
+            logger.warning("Re-enqueued reply delivery for stuck ticket %s", ticket_id)
 
 
 async def startup(ctx: dict) -> None:
@@ -123,6 +141,7 @@ async def shutdown(ctx: dict) -> None:
 
 class WorkerSettings:
     functions = [generate_draft, send_reply]
+    cron_jobs = [cron(requeue_stuck_tickets, second=0)]
     redis_settings: RedisSettings = get_redis_settings()
     on_startup = startup
     on_shutdown = shutdown

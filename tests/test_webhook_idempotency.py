@@ -6,16 +6,26 @@ from sqlalchemy import select
 
 from app.database import get_session
 from app.main import app
-from app.models import Ticket, WebhookEvent
+from app.models import Ticket, TicketStatus, WebhookEvent
 from app.queue import get_arq_pool
 
 
 class FakeArqPool:
+    """Mirrors arq's contract: a second enqueue with an existing _job_id is
+    a no-op returning None (arq does this atomically via WATCH/MULTI)."""
+
     def __init__(self) -> None:
         self.enqueued: list[tuple] = []
+        self.fail_next = False
 
-    async def enqueue_job(self, function: str, *args, **kwargs) -> None:
-        self.enqueued.append((function, args, kwargs))
+    async def enqueue_job(self, function: str, *args, _job_id: str | None = None, **kwargs):
+        if self.fail_next:
+            self.fail_next = False
+            raise ConnectionError("redis unavailable")
+        if _job_id and any(job[2].get("_job_id") == _job_id for job in self.enqueued):
+            return None
+        self.enqueued.append((function, args, {"_job_id": _job_id, **kwargs}))
+        return object()
 
 
 def _payload(event_id: str, ticket_id: str = "T-1042") -> dict:
@@ -72,3 +82,31 @@ async def test_concurrent_duplicate_delivery_is_deduped(fake_pool, session_facto
     async with session_factory() as session:
         events = (await session.execute(select(WebhookEvent))).scalars().all()
     assert len(events) == 1
+
+
+async def test_retry_after_failed_enqueue_still_schedules_draft(fake_pool, session_factory):
+    payload = _payload("evt_redis_down", ticket_id="T-3042")
+    fake_pool.fail_next = True
+
+    async with AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test") as client:
+        first = await client.post("/webhooks/helpdesk", json=payload)
+        retry = await client.post("/webhooks/helpdesk", json=payload)
+
+    assert first.status_code == 500
+    assert retry.status_code == 200
+    assert [job[0] for job in fake_pool.enqueued] == ["generate_draft"]
+
+
+async def test_redelivery_after_draft_is_ready_does_not_reenqueue(fake_pool, session_factory):
+    payload = _payload("evt_late_dup", ticket_id="T-4042")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/webhooks/helpdesk", json=payload)
+        async with session_factory() as session:
+            ticket = await session.scalar(select(Ticket).where(Ticket.ticket_id == "T-4042"))
+            ticket.status = TicketStatus.pending_review
+            await session.commit()
+        fake_pool.enqueued.clear()
+        await client.post("/webhooks/helpdesk", json=payload)
+
+    assert fake_pool.enqueued == []
