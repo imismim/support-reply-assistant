@@ -5,6 +5,8 @@
 оператору підтвердити чи відхилити її у веб-інтерфейсі, і надсилає
 підтверджену відповідь назад у хелпдеск.
 
+Репозиторій: https://github.com/imismim/support-reply-assistant
+
 Тестове завдання "AI-first Backend Engineer". Повного тексту завдання немає
 в репозиторії — короткий підсумок вимог нижче, у розділі
 [Відповідність вимогам завдання](#відповідність-вимогам-завдання).
@@ -27,6 +29,57 @@
 - Health check: https://protected-beyond-03149-3a6e260ec85a.herokuapp.com/health
 
 LLM-провайдер на деплої — Gemini (`LLM_PROVIDER=gemini`).
+
+## Як надіслати тікет (curl)
+
+Надіслати звернення на задеплоєний сервіс:
+
+```bash
+curl -X POST https://protected-beyond-03149-3a6e260ec85a.herokuapp.com/webhooks/helpdesk \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "evt_demo_1",
+    "ticket_id": "T-DEMO-1",
+    "customer_email": "user@example.com",
+    "message": "Не можу експортувати звіт у PDF",
+    "reply_url": "https://protected-beyond-03149-3a6e260ec85a.herokuapp.com/mock-helpdesk/tickets/T-DEMO-1/replies"
+  }'
+# → {"status":"accepted"}
+```
+
+Те саме локально (після `docker compose up`):
+
+```bash
+curl -X POST http://localhost:8000/webhooks/helpdesk \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "evt_demo_1",
+    "ticket_id": "T-DEMO-1",
+    "customer_email": "user@example.com",
+    "message": "Не можу експортувати звіт у PDF",
+    "reply_url": "http://web:8000/mock-helpdesk/tickets/T-DEMO-1/replies"
+  }'
+```
+
+Що далі:
+
+1. Вебхук одразу відповідає `{"status":"accepted"}`, тікет з'являється в
+   інтерфейсі оператора (`/`) зі статусом `received` → `drafting`.
+2. Через 5–30с (час виклику LLM) з'являється чернетка і статус
+   `pending_review`, під нею — назви використаних статей бази знань.
+3. «Підтвердити» → воркер надсилає відповідь на `reply_url` (мок
+   хелпдеску), статус стає `sent`; «Відхилити» → `rejected`.
+
+Нотатки:
+
+- `reply_url` — адреса, куди сервіс надішле підтверджену відповідь. Тут
+  вона вказує на вбудований мок хелпдеску (`/mock-helpdesk/...`), який
+  іноді навмисно повертає 5xx або відповідає із затримкою, щоб було видно
+  повтори. Локально хост — `web:8000`, бо запит робить контейнер `worker`
+  усередині мережі docker compose.
+- Повторна відправка з тим самим `event_id` (хоч одночасно) не створить
+  другий тікет і не запустить повторну генерацію — це дедуплікація
+  вебхука. Для нового тікета змініть `event_id` і `ticket_id`.
 
 ## Запуск
 
