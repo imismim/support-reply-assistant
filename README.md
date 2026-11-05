@@ -18,6 +18,16 @@
 - **pg_trgm** — пошук релевантних статей бази знань (детальніше нижче)
 - **Docker Compose** — локальний запуск усього стеку
 
+## Деплой
+
+Задеплоєно на Heroku: https://protected-beyond-03149-3a6e260ec85a.herokuapp.com/
+
+- Вебхук хелпдеску: `POST https://protected-beyond-03149-3a6e260ec85a.herokuapp.com/webhooks/helpdesk`
+- Веб-інтерфейс оператора: https://protected-beyond-03149-3a6e260ec85a.herokuapp.com/
+- Health check: https://protected-beyond-03149-3a6e260ec85a.herokuapp.com/health
+
+Без `ANTHROPIC_API_KEY` (демо-деплой працює в режимі fallback, див. нижче).
+
 ## Запуск
 
 ```bash
